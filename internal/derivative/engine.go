@@ -30,6 +30,9 @@ type Engine interface {
 	// CheckConflicts 检查规则冲突
 	CheckConflicts(ctx context.Context) ([]notify.RuleConflict, error)
 
+	// CheckRuleExists 检查是否存在匹配的规则（不执行，仅检查）
+	CheckRuleExists(ctx context.Context, order *models.Order) (bool, *models.DerivativeRule)
+
 	// StartAutoRefresh 启动自动刷新
 	StartAutoRefresh(ctx context.Context, interval time.Duration)
 }
@@ -89,6 +92,16 @@ func (e *engine) StartAutoRefresh(ctx context.Context, interval time.Duration) {
 	if len(conflicts) > 0 {
 		e.notifier.NotifyRuleConflict(conflicts)
 	}
+}
+
+// CheckRuleExists 检查是否存在匹配的规则
+func (e *engine) CheckRuleExists(ctx context.Context, order *models.Order) (bool, *models.DerivativeRule) {
+	rules := e.cache.GetRules()
+	rule := e.matcher.MatchFirst(rules, order)
+	if rule == nil {
+		return false, nil
+	}
+	return true, rule
 }
 
 func (e *engine) GenerateDerivativeOrder(ctx context.Context, params FillParams) (*DerivativeOrderParams, error) {

@@ -63,7 +63,7 @@ func NewServer(
 	derivativeEngine.StartAutoRefresh(context.Background(), 5*time.Minute)
 
 	// 初始化服务层
-	flowService := service.NewFlowService(cfg, binanceClient, flowRepo, orderRepo, fillRepo, auditRepo)
+	flowService := service.NewFlowService(cfg, binanceClient, flowRepo, orderRepo, fillRepo, auditRepo, notifier, derivativeEngine)
 	webhookProcessor := service.NewWebhookProcessor(
 		cfg, binanceClient, flowRepo, orderRepo, fillRepo,
 		deliveryRepo, auditRepo, flowService, derivativeEngine, ruleRepo, notifier,

@@ -60,9 +60,8 @@ type WebhookConfig struct {
 }
 
 type DerivativeConfig struct {
-	Enabled            bool   `mapstructure:"enabled"`
-	DefaultHedgeMarket string `mapstructure:"default_hedge_market"`
-	ContractType       string `mapstructure:"contract_type"`
+	Enabled             bool `mapstructure:"enabled"`
+	RequireMatchingRule bool `mapstructure:"require_matching_rule"` // 创建订单时是否要求匹配衍生规则
 }
 
 type LogConfig struct {
@@ -96,8 +95,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	viper.SetDefault("webhook.enabled", true)
 	viper.SetDefault("webhook.callback_path", "/internal/webhook/binance")
 	viper.SetDefault("derivative.enabled", true)
-	viper.SetDefault("derivative.default_hedge_market", "coinm")
-	viper.SetDefault("derivative.contract_type", "current")
+	viper.SetDefault("derivative.require_matching_rule", true)
 
 	// Read environment variables
 	viper.AutomaticEnv()

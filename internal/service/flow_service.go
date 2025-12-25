@@ -18,6 +18,7 @@ import (
 	"github.com/eyes2near/b-trading/internal/binance"
 	"github.com/eyes2near/b-trading/internal/config"
 	"github.com/eyes2near/b-trading/internal/database"
+	"github.com/eyes2near/b-trading/internal/derivative"
 	"github.com/eyes2near/b-trading/internal/models"
 	"github.com/eyes2near/b-trading/internal/notify"
 	"github.com/google/uuid"
@@ -41,13 +42,14 @@ type CreateFlowRequest struct {
 }
 
 type flowService struct {
-	cfg           *config.Config
-	binanceClient binance.Client
-	flowRepo      database.TradingFlowRepository
-	orderRepo     database.OrderRepository
-	fillRepo      database.FillEventRepository
-	auditRepo     database.AuditLogRepository
-	notifier      notify.Notifier
+	cfg              *config.Config
+	binanceClient    binance.Client
+	flowRepo         database.TradingFlowRepository
+	orderRepo        database.OrderRepository
+	fillRepo         database.FillEventRepository
+	auditRepo        database.AuditLogRepository
+	notifier         *notify.Notifier
+	derivativeEngine derivative.Engine
 }
 
 func NewFlowService(
@@ -57,15 +59,18 @@ func NewFlowService(
 	orderRepo database.OrderRepository,
 	fillRepo database.FillEventRepository,
 	auditRepo database.AuditLogRepository,
+	notifier *notify.Notifier,
+	derivativeEngine derivative.Engine,
 ) FlowService {
 	return &flowService{
-		cfg:           cfg,
-		binanceClient: binanceClient,
-		flowRepo:      flowRepo,
-		orderRepo:     orderRepo,
-		fillRepo:      fillRepo,
-		auditRepo:     auditRepo,
-		notifier:      *notify.NewNotifier(),
+		cfg:              cfg,
+		binanceClient:    binanceClient,
+		flowRepo:         flowRepo,
+		orderRepo:        orderRepo,
+		fillRepo:         fillRepo,
+		auditRepo:        auditRepo,
+		notifier:         notifier,
+		derivativeEngine: derivativeEngine,
 	}
 }
 
@@ -92,6 +97,31 @@ func (s *flowService) CreateFlow(ctx context.Context, req CreateFlowRequest) (*m
 		Price:          sql.NullString{String: req.Price, Valid: req.Price != ""},
 		Status:         models.OrderStatusPending,
 		FilledQuantity: "0",
+	}
+
+	// ============================================
+	// 检查是否要求匹配衍生规则
+	// ============================================
+	if s.cfg.Derivative.Enabled && s.cfg.Derivative.RequireMatchingRule && s.derivativeEngine != nil {
+		exists, matchedRule := s.derivativeEngine.CheckRuleExists(ctx, order)
+		if !exists {
+			errMsg := fmt.Sprintf("no matching derivative rule for order (market=%s, symbol=%s, direction=%s)",
+				req.MarketType, req.Symbol, req.Direction)
+			log.Printf("Flow creation blocked: %s", errMsg)
+
+			s.notifier.NotifyNoMatchingRule(0, req.MarketType, req.Symbol)
+
+			s.createAuditLog(ctx, 0, 0, models.LogTypeError, models.LogSeverityWarning,
+				"Flow creation blocked: no matching derivative rule", map[string]interface{}{
+					"market_type": req.MarketType,
+					"symbol":      req.Symbol,
+					"direction":   req.Direction,
+				})
+
+			return nil, fmt.Errorf("no matching derivative rule: %s", errMsg)
+		}
+		log.Printf("Matched derivative rule [%s] for new order (market=%s, symbol=%s)",
+			matchedRule.Name, req.MarketType, req.Symbol)
 	}
 
 	if err := s.flowRepo.CreateFlowWithOrder(ctx, flow, order); err != nil {
