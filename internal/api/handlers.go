@@ -3,6 +3,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -104,8 +105,18 @@ func (h *Handler) CreateFlow(c *gin.Context) {
 
 	flow, err := h.flowService.CreateFlow(c.Request.Context(), req)
 	if err != nil {
+		// 检查是否为规则不匹配错误
+		var noRuleErr *service.ErrNoMatchingRule
+		if errors.As(err, &noRuleErr) {
+			log.Printf("Flow creation rejected: %v", err)
+			c.String(http.StatusBadRequest,
+				"无法创建订单：未找到匹配的衍生规则 (市场=%s, 品种=%s, 方向=%s)。请先配置对应的衍生规则。",
+				noRuleErr.Market, noRuleErr.Symbol, noRuleErr.Direction)
+			return
+		}
+
 		log.Printf("Failed to create flow: %v", err)
-		c.String(http.StatusInternalServerError, "Error creating flow: "+err.Error())
+		c.String(http.StatusInternalServerError, "创建订单失败: "+err.Error())
 		return
 	}
 

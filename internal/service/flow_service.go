@@ -30,6 +30,18 @@ type FlowService interface {
 	CheckFlowCompletion(ctx context.Context, flowID uint) error
 }
 
+// ErrNoMatchingRule 无匹配的衍生规则错误
+type ErrNoMatchingRule struct {
+	Market    string
+	Symbol    string
+	Direction string
+}
+
+func (e *ErrNoMatchingRule) Error() string {
+	return fmt.Sprintf("no matching derivative rule for order (market=%s, symbol=%s, direction=%s)",
+		e.Market, e.Symbol, e.Direction)
+}
+
 type CreateFlowRequest struct {
 	MarketType   string
 	Symbol       string
@@ -105,9 +117,8 @@ func (s *flowService) CreateFlow(ctx context.Context, req CreateFlowRequest) (*m
 	if s.cfg.Derivative.Enabled && s.cfg.Derivative.RequireMatchingRule && s.derivativeEngine != nil {
 		exists, matchedRule := s.derivativeEngine.CheckRuleExists(ctx, order)
 		if !exists {
-			errMsg := fmt.Sprintf("no matching derivative rule for order (market=%s, symbol=%s, direction=%s)",
+			log.Printf("Flow creation blocked: no matching derivative rule (market=%s, symbol=%s, direction=%s)",
 				req.MarketType, req.Symbol, req.Direction)
-			log.Printf("Flow creation blocked: %s", errMsg)
 
 			s.notifier.NotifyNoMatchingRule(0, req.MarketType, req.Symbol)
 
@@ -118,7 +129,11 @@ func (s *flowService) CreateFlow(ctx context.Context, req CreateFlowRequest) (*m
 					"direction":   req.Direction,
 				})
 
-			return nil, fmt.Errorf("no matching derivative rule: %s", errMsg)
+			return nil, &ErrNoMatchingRule{
+				Market:    req.MarketType,
+				Symbol:    req.Symbol,
+				Direction: req.Direction,
+			}
 		}
 		log.Printf("Matched derivative rule [%s] for new order (market=%s, symbol=%s)",
 			matchedRule.Name, req.MarketType, req.Symbol)
