@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"strconv"
 	"time"
 
@@ -710,53 +709,4 @@ func (p *webhookProcessor) createAuditLog(ctx context.Context, flowID uint, orde
 	if err := p.auditRepo.Create(ctx, auditLog); err != nil {
 		log.Printf("Failed to create audit log: %v", err)
 	}
-}
-
-func (p *webhookProcessor) convertToContractQty(qty, price string) string {
-	qtyFloat, _ := strconv.ParseFloat(qty, 64)
-	priceFloat, _ := strconv.ParseFloat(price, 64)
-
-	if priceFloat == 0 {
-		return "1"
-	}
-
-	usdValue := qtyFloat * priceFloat
-	contracts := math.Floor(usdValue / 100)
-
-	if contracts < 1 {
-		contracts = 1
-	}
-
-	return strconv.FormatFloat(contracts, 'f', 0, 64)
-}
-
-// extractBaseCurrency extracts the base currency from a symbol
-// e.g., BTCUSDT -> BTC, BTCUSD_251226 -> BTC
-func extractBaseCurrency(symbol string) string {
-	quotes := []string{"USDT", "BUSD", "USD", "PERP"}
-	result := symbol
-
-	// Handle BTCUSD_251226 format: remove date suffix first
-	if idx := indexOf(result, '_'); idx > 0 {
-		result = result[:idx]
-	}
-
-	// Remove quote currency suffix
-	for _, q := range quotes {
-		if len(result) > len(q) && result[len(result)-len(q):] == q {
-			result = result[:len(result)-len(q)]
-			break
-		}
-	}
-
-	return result
-}
-
-func indexOf(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
 }

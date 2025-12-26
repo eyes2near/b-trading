@@ -1,20 +1,19 @@
-// internal/api/handlers.go - 更新 Handler 结构体和方法
+// internal/api/handlers.go
 
 package api
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/eyes2near/b-trading/internal/binance"
 	"github.com/eyes2near/b-trading/internal/config"
 	"github.com/eyes2near/b-trading/internal/database"
 	"github.com/eyes2near/b-trading/internal/derivative"
+	"github.com/eyes2near/b-trading/internal/models"
 	"github.com/eyes2near/b-trading/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -49,195 +48,129 @@ func NewHandler(
 	}
 }
 
-func (h *Handler) RenderDashboard(c *gin.Context) {
-	log.Println("Handling / request, rendering dashboard.html")
+// RenderDashboard 已被移除，因为系统已转为纯 API 模式
 
-	c.HTML(http.StatusOK, "dashboard.html", gin.H{
-		"Env":         h.cfg.App.Env,
-		"SpotSymbols": h.cfg.Markets.SpotSymbols,
-		"CoinmBases":  h.cfg.Markets.CoinmBases,
-	})
-}
-
-// CreateFlow 处理表单提交 - 使用 FlowService 真实下单
+// CreateFlow 处理创建交易流程请求 (POST /api/flows)
 func (h *Handler) CreateFlow(c *gin.Context) {
-	marketType := c.PostForm("market_type")
-	qtyStr := c.PostForm("quantity")
-	priceStr := c.PostForm("price")
-	direction := c.PostForm("direction")
-	orderType := c.PostForm("order_type")
-
-	var symbolStr string
-	var symbolType string
-	var contractType string
-
-	if strings.ToLower(marketType) == "spot" {
-		symbolStr = strings.ToUpper(c.PostForm("symbol_spot"))
-		symbolType = symbolStr
-	} else if strings.ToLower(marketType) == "coin-m" {
-		symbolStr = strings.ToUpper(c.PostForm("resolved_symbol"))
-		baseCurrency := strings.ToUpper(c.PostForm("base_currency"))
-		contractType = c.PostForm("contract_type")
-		symbolType = baseCurrency + "-" + contractType
-
-		if symbolStr == "" {
-			c.String(http.StatusBadRequest, "Error: resolved_symbol is required for Coin-M")
-			return
-		}
-	}
-
-	if symbolStr == "" {
-		c.String(http.StatusBadRequest, "Error: symbol is required")
+	var reqDTO CreateFlowRequest
+	if err := c.ShouldBindJSON(&reqDTO); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
 		return
 	}
 
-	// 调用 FlowService 创建流程并下单
-	req := service.CreateFlowRequest{
-		MarketType:   marketType,
-		Symbol:       symbolStr,
-		SymbolType:   symbolType,
-		ContractType: contractType,
-		Direction:    direction,
-		OrderType:    orderType,
-		Quantity:     qtyStr,
-		Price:        priceStr,
+	// 构造 Service 层请求
+	// 注意：前端传入的 symbol_type 如果为空，对于 Coin-M 可能需要特殊处理，
+	// 但根据 API 文档，symbol_type 是顶层字段。
+	svcReq := service.CreateFlowRequest{
+		MarketType:   reqDTO.MarketType,
+		Symbol:       reqDTO.Symbol,
+		SymbolType:   reqDTO.SymbolType,
+		ContractType: reqDTO.ContractType, // DTO 中可选
+		Direction:    reqDTO.Direction,
+		OrderType:    reqDTO.OrderType,
+		Quantity:     reqDTO.Quantity,
+		Price:        reqDTO.Price,
 	}
 
-	flow, err := h.flowService.CreateFlow(c.Request.Context(), req)
+	// 针对 Coin-M 的兼容性逻辑 (如果前端未传 symbol_type)
+	if strings.ToLower(svcReq.MarketType) == "coin-m" && svcReq.SymbolType == "" {
+		// 尝试构造一个默认的 SymbolType，或者报错
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol_type is required for Coin-M market"})
+		return
+	}
+	// 针对 Spot，SymbolType 通常等于 Symbol
+	if strings.ToLower(svcReq.MarketType) == "spot" && svcReq.SymbolType == "" {
+		svcReq.SymbolType = svcReq.Symbol
+	}
+
+	flow, err := h.flowService.CreateFlow(c.Request.Context(), svcReq)
 	if err != nil {
 		// 检查是否为规则不匹配错误
 		var noRuleErr *service.ErrNoMatchingRule
 		if errors.As(err, &noRuleErr) {
 			log.Printf("Flow creation rejected: %v", err)
-			c.String(http.StatusBadRequest,
-				"无法创建订单：未找到匹配的衍生规则 (市场=%s, 品种=%s, 方向=%s)。请先配置对应的衍生规则。",
-				noRuleErr.Market, noRuleErr.Symbol, noRuleErr.Direction)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "无法创建订单：未找到匹配的衍生规则",
+				"details": gin.H{
+					"market":    noRuleErr.Market,
+					"symbol":    noRuleErr.Symbol,
+					"direction": noRuleErr.Direction,
+				},
+			})
 			return
 		}
 
 		log.Printf("Failed to create flow: %v", err)
-		c.String(http.StatusInternalServerError, "创建订单失败: "+err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建订单失败: " + err.Error()})
 		return
 	}
 
 	log.Printf("Flow created successfully: %s", flow.FlowUUID)
-
-	c.Header("HX-Trigger", "load")
-	c.Status(http.StatusCreated)
+	c.JSON(http.StatusCreated, mapFlowToResponse(flow))
 }
 
-// CancelFlow 取消流程
+// CancelFlow 取消流程 (POST /api/flows/:id/cancel)
 func (h *Handler) CancelFlow(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		c.String(http.StatusBadRequest, "Invalid flow ID")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid flow ID"})
 		return
 	}
 
 	if err := h.flowService.CancelFlow(c.Request.Context(), uint(id)); err != nil {
 		log.Printf("Failed to cancel flow: %v", err)
-		c.String(http.StatusInternalServerError, "Error cancelling flow: "+err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error cancelling flow: " + err.Error()})
 		return
 	}
 
-	c.Header("HX-Trigger", "load")
-	c.Status(http.StatusOK)
+	c.JSON(http.StatusOK, gin.H{"message": "Flow cancelled successfully"})
 }
 
+// GetActiveFlows 获取活跃流程列表 (GET /api/flows)
 func (h *Handler) GetActiveFlows(c *gin.Context) {
-	flows, err := h.flowRepo.GetActiveFlowsView(c.Request.Context(), 50, 0)
+	// 1. 获取活跃 Flow 的基本列表 (repository 中 ListActive 未预加载 Orders)
+	basicFlows, err := h.flowRepo.ListActive(c.Request.Context(), 50, 0)
 	if err != nil {
-		c.String(http.StatusInternalServerError, "Error fetching flows")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching flows: " + err.Error()})
 		return
 	}
 
-	c.HTML(http.StatusOK, "flow_list.html", gin.H{
-		"Flows": flows,
-	})
+	// 2. 数据组装 (Hydration)
+	// 由于 ListActive 没有 Preload Orders，而 API 响应需要 Orders 摘要，
+	// 这里通过循环调用 GetByID (它包含 Preload) 来获取完整信息。
+	// 注意：在生产环境高并发下这会导致 N+1 查询，建议后续优化 Repository 层增加 FindAllWithOrders 方法。
+	var fullFlows []models.TradingFlow
+	for _, f := range basicFlows {
+		// 利用缓存或数据库查询完整信息
+		fullDetails, err := h.flowRepo.GetByID(c.Request.Context(), f.ID)
+		if err == nil {
+			fullFlows = append(fullFlows, *fullDetails)
+		} else {
+			// 如果获取详情失败，降级使用基本信息（虽然 Orders 为空）
+			fullFlows = append(fullFlows, f)
+		}
+	}
+
+	c.JSON(http.StatusOK, mapFlowsToResponse(fullFlows))
 }
 
+// GetFlowDetail 获取流程详情 (GET /api/flows/:id)
 func (h *Handler) GetFlowDetail(c *gin.Context) {
 	idStr := c.Param("id")
 	id, _ := strconv.Atoi(idStr)
 
+	// GetByID 已经预加载了 Orders 和 FillEvents
 	flow, err := h.flowRepo.GetByID(c.Request.Context(), uint(id))
 	if err != nil {
-		c.String(http.StatusNotFound, "Flow not found")
+		c.JSON(http.StatusNotFound, gin.H{"error": "Flow not found"})
 		return
 	}
 
-	html := fmt.Sprintf(`
-		<div class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center" 
-			 x-data @click.self="$el.remove()">
-			<div class="relative bg-white dark:bg-dark-card rounded-lg shadow-xl w-3/4 max-w-4xl max-h-[90vh] flex flex-col">
-				<div class="flex justify-between items-center p-5 border-b border-gray-200 dark:border-dark-border">
-					<h3 class="text-xl font-bold text-gray-900 dark:text-white">流程详情: %s</h3>
-					<button @click="$root.remove()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-						<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-					</button>
-				</div>
-				<div class="p-6 overflow-y-auto">
-					<div class="mb-4 bg-blue-50 dark:bg-blue-900/20 p-4 rounded border border-blue-100 dark:border-blue-800">
-						<h4 class="font-bold text-blue-800 dark:text-blue-300">主订单 (Order A)</h4>
-						<div class="grid grid-cols-3 gap-4 mt-2 text-sm text-gray-700 dark:text-gray-300">
-							<div>ID: %d</div>
-							<div>Status: %s</div>
-							<div>Binance ID: %s</div>
-						</div>
-					</div>
-					<div class="border-t border-gray-200 dark:border-dark-border pt-4 mt-4">
-						<h4 class="font-bold text-gray-700 dark:text-gray-300 mb-2">订单列表</h4>
-						<table class="min-w-full text-sm">
-							<thead><tr class="text-left text-gray-500 dark:text-gray-400">
-								<th class="pb-2">角色</th><th class="pb-2">Symbol</th><th class="pb-2">方向</th><th class="pb-2">数量</th><th class="pb-2">成交</th><th class="pb-2">状态</th>
-							</tr></thead>
-							<tbody class="text-gray-700 dark:text-gray-300">`,
-		flow.FlowUUID, flow.Orders[0].ID, flow.Orders[0].Status, flow.Orders[0].BinanceOrderID)
-
-	for _, order := range flow.Orders {
-		html += fmt.Sprintf(`
-								<tr class="border-t border-gray-100 dark:border-dark-border">
-									<td class="py-2">%s</td>
-									<td class="py-2 font-mono">%s</td>
-									<td class="py-2">%s</td>
-									<td class="py-2 font-mono">%s</td>
-									<td class="py-2 font-mono">%s</td>
-									<td class="py-2"><span class="px-2 py-1 rounded text-xs %s">%s</span></td>
-								</tr>`,
-			order.OrderRole, order.FullSymbol, order.Direction, order.Quantity, order.FilledQuantity,
-			getStatusClass(string(order.Status)), order.Status)
-	}
-
-	html += `
-							</tbody>
-						</table>
-					</div>
-					<div class="border-t border-gray-200 dark:border-dark-border pt-4 mt-4">
-						<h4 class="font-bold text-gray-700 dark:text-gray-300 mb-2">创建时间</h4>
-						<p class="text-gray-500 dark:text-gray-400 text-sm">` + flow.CreatedAt.Format(time.RFC3339) + `</p>
-					</div>
-				</div>
-			</div>
-		</div>`
-
-	c.Writer.WriteString(html)
+	c.JSON(http.StatusOK, mapFlowToResponse(flow))
 }
 
-func getStatusClass(status string) string {
-	switch status {
-	case "filled":
-		return "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
-	case "submitted", "partially_filled":
-		return "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400"
-	case "cancelled", "rejected", "expired":
-		return "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
-	default:
-		return "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300"
-	}
-}
-
-// 价格查询接口保持不变
+// GetSpotPrice 查询现货价格 (GET /api/prices/spot/:symbol)
 func (h *Handler) GetSpotPrice(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
 	if symbol == "" {
@@ -255,6 +188,7 @@ func (h *Handler) GetSpotPrice(c *gin.Context) {
 	c.JSON(http.StatusOK, price)
 }
 
+// GetCoinMPrice 查询币本位价格 (GET /api/prices/coinm/:symbol)
 func (h *Handler) GetCoinMPrice(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
 	if symbol == "" {
@@ -272,6 +206,7 @@ func (h *Handler) GetCoinMPrice(c *gin.Context) {
 	c.JSON(http.StatusOK, price)
 }
 
+// GetQuarterSymbols 查询季度合约信息 (GET /api/coinm/quarter-symbols/:base)
 func (h *Handler) GetQuarterSymbols(c *gin.Context) {
 	base := strings.ToUpper(c.Param("base"))
 	if base == "" {

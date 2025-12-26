@@ -3,15 +3,17 @@ module github.com/eyes2near/b-trading
 go 1.25.5
 
 require (
+	github.com/Knetic/govaluate v3.0.0+incompatible
 	github.com/gin-gonic/gin v1.11.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
+	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/viper v1.21.0
 	gorm.io/gorm v1.31.1
 )
 
 require (
-	github.com/Knetic/govaluate v3.0.0+incompatible // indirect
 	github.com/bytedance/sonic v1.14.0 // indirect
 	github.com/bytedance/sonic/loader v0.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
@@ -40,7 +42,6 @@ require (
 	github.com/quic-go/quic-go v0.54.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
-	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

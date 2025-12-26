@@ -1,3 +1,4 @@
+// internal/config/config.go
 package config
 
 import (
@@ -8,15 +9,25 @@ import (
 )
 
 type Config struct {
-	App         AppConfig         `mapstructure:"app"`
-	Server      ServerConfig      `mapstructure:"server"`
-	Database    DatabaseConfig    `mapstructure:"database"`
-	Binance     BinanceConfig     `mapstructure:"binance"`
-	BinanceREST BinanceRESTConfig `mapstructure:"binance_rest"`
-	Webhook     WebhookConfig     `mapstructure:"webhook"`
-	Derivative  DerivativeConfig  `mapstructure:"derivative"`
-	Log         LogConfig         `mapstructure:"log"`
-	Markets     MarketsConfig     `mapstructure:"markets"`
+	App          AppConfig          `mapstructure:"app"`
+	Server       ServerConfig       `mapstructure:"server"`
+	Database     DatabaseConfig     `mapstructure:"database"`
+	Binance      BinanceConfig      `mapstructure:"binance"`
+	BinanceREST  BinanceRESTConfig  `mapstructure:"binance_rest"`
+	Webhook      WebhookConfig      `mapstructure:"webhook"`
+	Derivative   DerivativeConfig   `mapstructure:"derivative"`
+	Log          LogConfig          `mapstructure:"log"`
+	Markets      MarketsConfig      `mapstructure:"markets"`
+	MarketStream MarketStreamConfig `mapstructure:"market_stream"`
+}
+
+type MarketStreamConfig struct {
+	BrokerURL         string        `mapstructure:"broker_url"`
+	PublisherAPI      string        `mapstructure:"publisher_api"`
+	ReconnectDelay    time.Duration `mapstructure:"reconnect_delay"`
+	MaxReconnect      time.Duration `mapstructure:"max_reconnect"`
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
+	DefaultLevels     int           `mapstructure:"default_levels"`
 }
 
 type AppConfig struct {
@@ -26,8 +37,10 @@ type AppConfig struct {
 }
 
 type ServerConfig struct {
-	Port string `mapstructure:"port"`
-	Host string `mapstructure:"host"`
+	Port     string `mapstructure:"port"`
+	Host     string `mapstructure:"host"`
+	CertFile string `mapstructure:"cert_file"`
+	KeyFile  string `mapstructure:"key_file"`
 }
 
 type DatabaseConfig struct {
@@ -61,7 +74,7 @@ type WebhookConfig struct {
 
 type DerivativeConfig struct {
 	Enabled             bool `mapstructure:"enabled"`
-	RequireMatchingRule bool `mapstructure:"require_matching_rule"` // 创建订单时是否要求匹配衍生规则
+	RequireMatchingRule bool `mapstructure:"require_matching_rule"`
 }
 
 type LogConfig struct {
@@ -96,6 +109,14 @@ func LoadConfig(configPath string) (*Config, error) {
 	viper.SetDefault("webhook.callback_path", "/internal/webhook/binance")
 	viper.SetDefault("derivative.enabled", true)
 	viper.SetDefault("derivative.require_matching_rule", true)
+
+	// MarketStream defaults
+	viper.SetDefault("market_stream.broker_url", "ws://localhost:1880/ws")
+	viper.SetDefault("market_stream.publisher_api", "http://localhost:9090")
+	viper.SetDefault("market_stream.reconnect_delay", "1s")
+	viper.SetDefault("market_stream.max_reconnect", "30s")
+	viper.SetDefault("market_stream.heartbeat_interval", "30s")
+	viper.SetDefault("market_stream.default_levels", 5)
 
 	// Read environment variables
 	viper.AutomaticEnv()
