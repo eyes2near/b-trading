@@ -1,0 +1,56 @@
+# configs/config.yaml
+app:
+  name: "Binance Audit Trader"
+  version: "0.1.0"
+  env: "development"
+
+server:
+  port: 8080
+  cert_file: "server.crt" # 如果为空，则自动降级为 HTTP
+  key_file: "server.key"
+
+database:
+  # SQLite 数据库文件路径
+  dsn: "./data/trading_audit.db"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: "1h"
+  conn_max_idle_time: "10m"
+  log_level: 3 # 4 = Info, 会打印 SQL 语句
+
+log:
+  level: "debug"
+  output: "stdout"
+
+# 新增：Binance REST API 服务配置
+binance_rest:
+  base_url: "http://localhost:8088"
+  api_token: "a1weiredtoken~)^"
+  timeout: 30s
+
+webhook:
+  enabled: true
+  callback_base_url: "https://localhost:8080"
+  callback_path: "/internal/webhook/binance"
+
+markets:
+  spot_symbols: 
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+  coinm_bases:
+    - "BTC"
+    - "ETH"
+    - "BNB"
+
+derivative:
+  enabled: true
+  require_matching_rule: true
+
+market_stream:
+  broker_url: "ws://10.10.1.1:1880/ws"
+  publisher_api: "http://localhost:9090"
+  reconnect_delay: 1s
+  max_reconnect: 30s
+  heartbeat_interval: 30s
+  default_levels: 5
