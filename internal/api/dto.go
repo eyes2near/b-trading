@@ -33,13 +33,14 @@ type CreateFlowRequest struct {
 // OrderDTO 对应文档中的 Order 结构
 type OrderDTO struct {
 	ID             uint   `json:"id"`
-	OrderRole      string `json:"order_role"`       // "Main" or "Hedge"
-	FullSymbol     string `json:"full_symbol"`      // e.g. "BTCUSDT"
-	Direction      string `json:"direction"`        // "long", "short"
-	Quantity       string `json:"quantity"`         // 数量
-	FilledQuantity string `json:"filled_quantity"`  // 已成交数量
-	Status         string `json:"status"`           // 状态
-	BinanceOrderID string `json:"binance_order_id"` // 币安订单号
+	OrderRole      string `json:"order_role"`                 // "Main" or "Hedge"
+	FullSymbol     string `json:"full_symbol"`                // e.g. "BTCUSDT"
+	Direction      string `json:"direction"`                  // "long", "short"
+	Quantity       string `json:"quantity"`                   // 数量
+	FilledQuantity string `json:"filled_quantity"`            // 已成交数量
+	Status         string `json:"status"`                     // 状态
+	BinanceOrderID string `json:"binance_order_id"`           // 币安订单号
+	ArgFilledPrice string `json:"avg_filled_price,omitempty"` // 价格
 }
 
 // FlowResponse 对应文档 1.1 和 1.2 的 Flow 响应结构
@@ -93,6 +94,7 @@ func mapFlowToResponse(flow *models.TradingFlow) FlowResponse {
 			FilledQuantity: order.FilledQuantity,
 			Status:         string(order.Status),
 			BinanceOrderID: order.BinanceOrderID,
+			ArgFilledPrice: order.AvgFillPrice,
 		})
 	}
 

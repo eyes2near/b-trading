@@ -149,6 +149,7 @@ type Order struct {
 	Price          sql.NullString `gorm:"type:decimal(20,8)" json:"price,omitempty"`
 	Quantity       string         `gorm:"not null;type:decimal(20,8)" json:"quantity"`
 	FilledQuantity string         `gorm:"not null;type:decimal(20,8);default:0" json:"filled_quantity"`
+	AvgFillPrice   string         `gorm:"type:decimal(20,8);default:0" json:"avg_fill_price"`
 
 	// 订单状态
 	Status               OrderStatus `gorm:"not null;index;size:20" json:"status"`

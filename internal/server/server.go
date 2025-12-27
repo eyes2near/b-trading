@@ -22,7 +22,7 @@ import (
 type Server struct {
 	engine    *gin.Engine
 	cfg       *config.Config
-	streamMgr *market.StreamManager // 添加字段以便关闭时清理
+	streamMgr *market.StreamManager
 }
 
 func NewServer(
@@ -37,9 +37,7 @@ func NewServer(
 ) *Server {
 	r := gin.Default()
 
-	// =========================================================
-	// CORS 中间件配置
-	// =========================================================
+	// CORS 中间件
 	r.Use(CORSMiddleware())
 
 	// 初始化通知服务
@@ -49,20 +47,58 @@ func NewServer(
 	derivativeEngine := derivative.NewEngine(binanceClient, ruleRepo, notifier)
 	derivativeEngine.StartAutoRefresh(context.Background(), 5*time.Minute)
 
-	// 初始化服务层
-	flowService := service.NewFlowService(cfg, binanceClient, flowRepo, orderRepo, fillRepo, auditRepo, notifier, derivativeEngine)
+	// =========================================================
+	// 按依赖顺序初始化服务
+	// =========================================================
+
+	// 1. 审计服务（无依赖）
+	auditService := service.NewAuditService(auditRepo, orderRepo)
+
+	// 2. 成交处理器（依赖：orderRepo, fillRepo, auditService）
+	fillProcessor := service.NewFillProcessor(orderRepo, fillRepo, auditService)
+
+	// 3. 订单服务（依赖：fillProcessor, auditService, derivativeEngine）
+	orderService := service.NewOrderService(
+		cfg,
+		binanceClient,
+		orderRepo,
+		fillRepo,
+		ruleRepo,
+		fillProcessor,
+		auditService,
+		notifier,
+		derivativeEngine,
+	)
+
+	// 4. 流程服务（依赖：orderService, auditService）
+	//    内部会调用 orderService.SetFlowCompletionChecker(flowService)
+	flowService := service.NewFlowService(
+		cfg,
+		flowRepo,
+		orderService,
+		auditService,
+		notifier,
+		derivativeEngine,
+	)
+
+	// 5. Webhook 处理器
 	webhookProcessor := service.NewWebhookProcessor(
-		cfg, binanceClient, flowRepo, orderRepo, fillRepo,
-		deliveryRepo, auditRepo, flowService, derivativeEngine, ruleRepo, notifier,
+		cfg,
+		orderRepo,
+		deliveryRepo,
+		orderService,
+		fillProcessor,
+		flowService,
+		auditService,
+		derivativeEngine,
+		notifier,
 	)
 
 	// 初始化 Handler
 	h := api.NewHandler(flowRepo, orderRepo, cfg, binanceClient, flowService, ruleRepo, derivativeEngine)
 	webhookHandler := api.NewWebhookHandler(webhookProcessor)
 
-	// =========================================================
-	// WebSocket 模块初始化
-	// =========================================================
+	// WebSocket 模块
 	streamMgr := market.NewStreamManager(cfg.MarketStream)
 	streamMgr.Run()
 
@@ -70,7 +106,7 @@ func NewServer(
 	// 路由注册
 	// -------------------------------------------------------------------------
 
-	// WebSocket 路由 - 市场数据流
+	// WebSocket 路由
 	r.GET("/ws/market", gin.WrapF(api.MarketStreamHandler(streamMgr)))
 
 	// 内部 Webhook 路由
@@ -79,18 +115,18 @@ func NewServer(
 	// API 路由组
 	apiGroup := r.Group("/api")
 	{
-		// 1. 交易流程管理 (Trading Flows)
+		// 交易流程管理
 		apiGroup.GET("/flows", h.GetActiveFlows)
 		apiGroup.GET("/flows/:id", h.GetFlowDetail)
 		apiGroup.POST("/flows", h.CreateFlow)
 		apiGroup.POST("/flows/:id/cancel", h.CancelFlow)
 
-		// 2. 市场数据查询 (Market Data)
+		// 市场数据查询
 		apiGroup.GET("/prices/spot/:symbol", h.GetSpotPrice)
 		apiGroup.GET("/prices/coinm/:symbol", h.GetCoinMPrice)
 		apiGroup.GET("/coinm/quarter-symbols/:base", h.GetQuarterSymbols)
 
-		// 3. 衍生订单规则管理
+		// 衍生订单规则管理
 		rulesGroup := apiGroup.Group("/derivative-rules")
 		{
 			rulesGroup.GET("", h.ListDerivativeRules)
@@ -116,8 +152,6 @@ func (s *Server) Run(addr string) error {
 
 	if certFile != "" && keyFile != "" {
 		log.Printf("🔒 Starting HTTPS/WSS server on %s", addr)
-		log.Printf("   Cert: %s", certFile)
-		log.Printf("   Key:  %s", keyFile)
 		return s.engine.RunTLS(addr, certFile, keyFile)
 	}
 
@@ -125,7 +159,6 @@ func (s *Server) Run(addr string) error {
 	return s.engine.Run(addr)
 }
 
-// Shutdown 优雅关闭服务器
 func (s *Server) Shutdown() {
 	if s.streamMgr != nil {
 		log.Println("Stopping market stream manager...")
@@ -133,9 +166,6 @@ func (s *Server) Shutdown() {
 	}
 }
 
-// =========================================================
-// CORS 中间件实现
-// =========================================================
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")

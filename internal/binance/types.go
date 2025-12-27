@@ -45,18 +45,21 @@ type OrderResponse struct {
 	Order OrderInfo `json:"order"`
 }
 type OrderInfo struct {
-	OrderID       int64     `json:"order_id"`
-	ClientOrderID string    `json:"client_order_id"`
-	Symbol        string    `json:"symbol"`
-	Side          string    `json:"side"`
-	Type          string    `json:"type"`
-	Price         string    `json:"price"`
-	OrigQty       string    `json:"orig_qty"`
-	ExecutedQty   string    `json:"executed_qty"`
-	Status        string    `json:"status"`
-	TimeInForce   string    `json:"time_in_force"`
-	CreateTime    time.Time `json:"create_time"`
-	UpdateTime    time.Time `json:"update_time"`
+	OrderID            int64     `json:"order_id"`
+	ClientOrderID      string    `json:"client_order_id,omitempty"`
+	Symbol             string    `json:"symbol"`
+	Side               string    `json:"side"`
+	Type               string    `json:"type"`
+	Price              string    `json:"price"`
+	OrigQty            string    `json:"orig_qty"`
+	ExecutedQty        string    `json:"executed_qty"`
+	AvgPrice           string    `json:"avg_price,omitempty"`            // 平均成交价
+	CumulativeQuoteQty string    `json:"cumulative_quote_qty,omitempty"` // 累计成交额,只对现货订单有效
+	Status             string    `json:"status"`
+	TimeInForce        string    `json:"time_in_force,omitempty"`
+	PositionSide       string    `json:"position_side,omitempty"`
+	CreateTime         time.Time `json:"create_time"`
+	UpdateTime         time.Time `json:"update_time"`
 }
 
 // SpotOrderRequest 现货下单请求
@@ -112,22 +115,14 @@ type TrackRetryConfig struct {
 
 // TrackWebhookResponse 创建 Track Job 响应
 type TrackWebhookResponse struct {
-	JobID         string          `json:"job_id"`
-	Status        string          `json:"status"`
-	Symbol        string          `json:"symbol"`
-	OrderID       int64           `json:"order_id"`
-	WebhookURL    string          `json:"webhook_url"`
-	WebhookSecret string          `json:"webhook_secret"`
-	Snapshot      []SnapshotEvent `json:"snapshot"`
-	Note          string          `json:"note,omitempty"`
-}
-
-// SnapshotEvent 快照事件
-type SnapshotEvent struct {
-	EventType             string `json:"event_type"`
-	OccurredAt            string `json:"occurred_at"`
-	CumulativeExecutedQty string `json:"cumulative_executed_qty"`
-	Status                string `json:"status"`
+	JobID         string    `json:"job_id"`
+	Status        string    `json:"status"`
+	Symbol        string    `json:"symbol"`
+	OrderID       int64     `json:"order_id"`
+	WebhookURL    string    `json:"webhook_url"`
+	WebhookSecret string    `json:"webhook_secret"`
+	Order         OrderInfo `json:"order"`
+	Note          string    `json:"note,omitempty"`
 }
 
 // TrackJobInfo Track Job 信息
@@ -164,10 +159,9 @@ type WebhookEvent struct {
 
 // WebhookEventData 事件数据
 type WebhookEventData struct {
-	DeltaExecutedQty      string       `json:"delta_executed_qty,omitempty"`
-	CumulativeExecutedQty string       `json:"cumulative_executed_qty"`
-	Status                string       `json:"status"`
-	Order                 WebhookOrder `json:"order"`
+	DeltaExecutedQty string    `json:"delta_executed_qty,omitempty"`
+	Status           string    `json:"status"`
+	Order            OrderInfo `json:"order"`
 }
 
 // WebhookOrder 事件中的订单信息（标准 JSON 命名：snake_case）

@@ -196,7 +196,7 @@ func (c *client) SpotTrackWebhook(ctx context.Context, req TrackWebhookRequest) 
 	if err != nil {
 		return nil, err
 	}
-
+	fmt.Println("spot track webhook->", string(body))
 	var resp TrackWebhookResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
@@ -290,7 +290,6 @@ func (c *client) CoinMTrackWebhook(ctx context.Context, req TrackWebhookRequest)
 	if err != nil {
 		return nil, err
 	}
-
 	var resp TrackWebhookResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)

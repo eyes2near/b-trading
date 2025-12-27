@@ -12,7 +12,6 @@ type Config struct {
 	App          AppConfig          `mapstructure:"app"`
 	Server       ServerConfig       `mapstructure:"server"`
 	Database     DatabaseConfig     `mapstructure:"database"`
-	Binance      BinanceConfig      `mapstructure:"binance"`
 	BinanceREST  BinanceRESTConfig  `mapstructure:"binance_rest"`
 	Webhook      WebhookConfig      `mapstructure:"webhook"`
 	Derivative   DerivativeConfig   `mapstructure:"derivative"`
@@ -50,13 +49,6 @@ type DatabaseConfig struct {
 	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
 	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time"`
 	LogLevel        int           `mapstructure:"log_level"`
-}
-
-type BinanceConfig struct {
-	APIKey     string `mapstructure:"api_key"`
-	SecretKey  string `mapstructure:"secret_key"`
-	UseTestnet bool   `mapstructure:"use_testnet"`
-	BaseURL    string `mapstructure:"base_url"`
 }
 
 type BinanceRESTConfig struct {
