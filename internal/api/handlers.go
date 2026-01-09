@@ -3,7 +3,9 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -48,8 +50,6 @@ func NewHandler(
 	}
 }
 
-// RenderDashboard 已被移除，因为系统已转为纯 API 模式
-
 // CreateFlow 处理创建交易流程请求 (POST /api/flows)
 func (h *Handler) CreateFlow(c *gin.Context) {
 	var reqDTO CreateFlowRequest
@@ -57,6 +57,9 @@ func (h *Handler) CreateFlow(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
 		return
 	}
+
+	//归一化market_type
+	reqDTO.MarketType = string(models.NormalizeMarketKey(reqDTO.MarketType))
 
 	// 构造 Service 层请求
 	// 注意：前端传入的 symbol_type 如果为空，对于 Coin-M 可能需要特殊处理，
@@ -70,6 +73,22 @@ func (h *Handler) CreateFlow(c *gin.Context) {
 		OrderType:    reqDTO.OrderType,
 		Quantity:     reqDTO.Quantity,
 		Price:        reqDTO.Price,
+	}
+
+	// 处理衍生规则
+	if reqDTO.DerivativeRule != nil {
+		// 方式1：直接使用自定义规则
+		if reqDTO.DerivativeRule.PriceExpression != "" || reqDTO.DerivativeRule.QuantityExpression != "" {
+			svcReq.DerivativeRule = reqDTO.DerivativeRule.ToFlowDerivativeRule()
+		} else if reqDTO.DerivativeRule.TemplateRuleID != nil || reqDTO.DerivativeRule.TemplateRuleName != "" {
+			// 方式2：基于模板创建
+			rule, err := h.resolveTemplateRule(c.Request.Context(), reqDTO.DerivativeRule)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to resolve template rule: " + err.Error()})
+				return
+			}
+			svcReq.DerivativeRule = rule
+		}
 	}
 
 	// 针对 Coin-M 的兼容性逻辑 (如果前端未传 symbol_type)
@@ -222,4 +241,58 @@ func (h *Handler) GetQuarterSymbols(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, symbols)
+}
+
+// resolveTemplateRule 从模板解析规则
+func (h *Handler) resolveTemplateRule(ctx context.Context, input *FlowDerivativeRuleInput) (*models.FlowDerivativeRule, error) {
+	var templateRule *models.DerivativeRule
+	var err error
+
+	if input.TemplateRuleID != nil {
+		templateRule, err = h.ruleRepo.GetByID(ctx, *input.TemplateRuleID)
+	} else if input.TemplateRuleName != "" {
+		templateRule, err = h.ruleRepo.GetByName(ctx, input.TemplateRuleName)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("template rule not found: %w", err)
+	}
+
+	// 从模板创建 Flow 规则
+	flowRule := &models.FlowDerivativeRule{
+		Enabled:             templateRule.Enabled,
+		SourceType:          "template",
+		TemplateID:          templateRule.ID,
+		TemplateName:        templateRule.Name,
+		DerivativeMarket:    templateRule.DerivativeMarket,
+		DerivativeSymbol:    templateRule.DerivativeSymbol,
+		DerivativeDirection: templateRule.DerivativeDirection,
+		DerivativeOrderType: templateRule.DerivativeOrderType,
+		PriceExpression:     templateRule.PriceExpression,
+		QuantityExpression:  templateRule.QuantityExpression,
+	}
+
+	// 应用覆盖
+	if input.Overrides != nil {
+		if v, ok := input.Overrides["derivative_market"]; ok {
+			flowRule.DerivativeMarket = v
+		}
+		if v, ok := input.Overrides["derivative_symbol"]; ok {
+			flowRule.DerivativeSymbol = v
+		}
+		if v, ok := input.Overrides["derivative_direction"]; ok {
+			flowRule.DerivativeDirection = v
+		}
+		if v, ok := input.Overrides["derivative_order_type"]; ok {
+			flowRule.DerivativeOrderType = v
+		}
+		if v, ok := input.Overrides["price_expression"]; ok {
+			flowRule.PriceExpression = v
+		}
+		if v, ok := input.Overrides["quantity_expression"]; ok {
+			flowRule.QuantityExpression = v
+		}
+	}
+
+	return flowRule, nil
 }

@@ -59,6 +59,7 @@ type orderServiceImpl struct {
 	orderRepo        database.OrderRepository
 	fillRepo         database.FillEventRepository
 	ruleRepo         database.DerivativeRuleRepository
+	flowRepo         database.TradingFlowRepository
 	fillProcessor    FillProcessor
 	audit            AuditService
 	notifier         *notify.Notifier
@@ -73,6 +74,7 @@ func NewOrderService(
 	orderRepo database.OrderRepository,
 	fillRepo database.FillEventRepository,
 	ruleRepo database.DerivativeRuleRepository,
+	flowRepo database.TradingFlowRepository,
 	fillProcessor FillProcessor,
 	audit AuditService,
 	notifier *notify.Notifier,
@@ -84,6 +86,7 @@ func NewOrderService(
 		orderRepo:        orderRepo,
 		fillRepo:         fillRepo,
 		ruleRepo:         ruleRepo,
+		flowRepo:         flowRepo,
 		fillProcessor:    fillProcessor,
 		audit:            audit,
 		notifier:         notifier,
@@ -146,7 +149,7 @@ func (s *orderServiceImpl) SubmitOrder(ctx context.Context, order *models.Order)
 	order.BinanceRawResponse = string(rawResp)
 
 	// 若立即终态
-	if models.IsTerminalBinanceStatus(binanceOrder.Status) {
+	if models.IsTerminalOrderStatus(binanceOrder.Status) {
 		order.CompletedAt = sql.NullTime{Time: time.Now(), Valid: true}
 		order.TrackJobStatus = "terminal"
 	}
@@ -350,12 +353,20 @@ func (s *orderServiceImpl) applyTrackWebhookResponse(ctx context.Context, order 
 }
 
 func (s *orderServiceImpl) triggerDerivativeFromFill(ctx context.Context, order *models.Order, fillEvent *models.FillEvent) {
-	derivativeParams, err := s.derivativeEngine.GenerateDerivativeOrder(ctx, derivative.FillParams{
+	// 获取 Flow 信息（包含规则配置）
+	flow, err := s.flowRepo.GetByID(ctx, order.FlowID)
+	if err != nil {
+		log.Printf("Failed to get flow for derivative trigger: %v", err)
+		return
+	}
+
+	// 使用 Flow 级别规则（优先）或全局规则
+	derivativeParams, err := s.derivativeEngine.GenerateDerivativeOrderForFlow(ctx, derivative.FillParams{
 		PrimaryOrder:  order,
 		FillPrice:     fillEvent.FillPrice,
 		Delta:         fillEvent.FillQuantity,
 		CumulativeQty: order.FilledQuantity,
-	})
+	}, flow)
 
 	if err != nil {
 		log.Printf("Failed to generate derivative order: %v", err)
@@ -431,7 +442,7 @@ func (s *orderServiceImpl) SubmitDerivativeOrder(ctx context.Context, primaryOrd
 	}
 
 	// 6. 若非立即终态，创建 Track Job
-	if !models.IsTerminalBinanceStatus(binanceOrder.Status) {
+	if !models.IsTerminalOrderStatus(binanceOrder.Status) {
 		if err := s.CreateTrackJob(ctx, derivativeOrder); err != nil {
 			log.Printf("Failed to create track job for derivative order: %v", err)
 		}

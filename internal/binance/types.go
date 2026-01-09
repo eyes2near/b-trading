@@ -190,11 +190,17 @@ type QuarterSymbolInfo struct {
 }
 
 type QuarterSymbolsResponse struct {
-	Base    string            `json:"base"`
-	Current QuarterSymbolInfo `json:"current"`
-	Next    QuarterSymbolInfo `json:"next"`
+	Error   *QuarterSymbolsError `json:"error,omitempty"`
+	Base    string               `json:"base"`
+	Current QuarterSymbolInfo    `json:"current"`
+	Next    QuarterSymbolInfo    `json:"next"`
 	Cache   struct {
 		Status    string `json:"status"`
 		UpdatedAt string `json:"updated_at"`
 	} `json:"cache"`
+}
+
+type QuarterSymbolsError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

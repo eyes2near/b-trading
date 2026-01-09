@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/eyes2near/b-trading/internal/binance"
-	"github.com/eyes2near/b-trading/internal/models"
 )
 
 // SymbolResolver Symbol 解析器
@@ -29,24 +28,31 @@ type ResolveResult struct {
 }
 
 // Resolve 解析 symbol 模板
-func (r *SymbolResolver) Resolve(ctx context.Context, symbolPattern string, primaryOrder *models.Order) (*ResolveResult, error) {
+func (r *SymbolResolver) Resolve(ctx context.Context, symbolPattern string, symbol string) (*ResolveResult, error) {
 	// 提取主订单的 base 货币
-	primaryBase := ExtractBaseCurrency(primaryOrder.FullSymbol)
+	primaryBase := ExtractBaseCurrency(symbol)
 
 	// 替换模板变量 {base}
 	resolved := strings.ReplaceAll(symbolPattern, "{base}", primaryBase)
 	resolved = strings.ReplaceAll(resolved, "{BASE}", primaryBase)
 
-	// 处理 coinm 语义 symbol
-	if strings.Contains(resolved, "_") {
-		parts := strings.Split(resolved, "_")
+	// 处理 coinm 语义 symbol, 如 btc_current、btc_next、btc-current、btc-next 等
+	if strings.ContainsAny(resolved, "_-") {
+		seqStr := "_"
+		if strings.Contains(resolved, "-") {
+			seqStr = "-"
+		}
+		parts := strings.Split(resolved, seqStr)
 		if len(parts) == 2 {
 			base := strings.ToUpper(parts[0])
 			contractType := strings.ToLower(parts[1])
 
 			// 查询实际合约 symbol
 			quarterResp, err := r.binanceClient.CoinMGetQuarterSymbols(ctx, base)
-			if err != nil {
+			if err != nil || quarterResp.Error != nil {
+				if quarterResp.Error != nil {
+					return nil, fmt.Errorf("failed to get quarter symbols for API error: %s - %s", quarterResp.Error.Code, quarterResp.Error.Message)
+				}
 				return nil, fmt.Errorf("failed to get quarter symbols for %s: %w", base, err)
 			}
 
@@ -83,9 +89,12 @@ func ExtractBaseCurrency(symbol string) string {
 	if idx := strings.Index(symbol, "_"); idx > 0 {
 		symbol = symbol[:idx]
 	}
+	if idx := strings.Index(symbol, "-"); idx > 0 {
+		symbol = symbol[:idx]
+	}
 
 	// 移除常见的计价货币后缀
-	quotes := []string{"USDT", "BUSD", "USD", "PERP"}
+	quotes := []string{"USDT", "BUSD", "USDC", "FDUSD", "USD", "PERP"}
 	result := symbol
 	for _, q := range quotes {
 		if strings.HasSuffix(result, q) {

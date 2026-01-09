@@ -23,7 +23,48 @@ type CreateFlowRequest struct {
 	Price      string `json:"price"`                          // 价格 (限价单必填)
 
 	// Coin-M 特有字段，如果前端逻辑包含 contract_type 也可在此接收
-	ContractType string `json:"contract_type,omitempty"`
+	ContractType   string                   `json:"contract_type,omitempty"`
+	DerivativeRule *FlowDerivativeRuleInput `json:"derivative_rule,omitempty"`
+}
+
+// FlowDerivativeRuleInput 创建 Flow 时的衍生规则输入
+type FlowDerivativeRuleInput struct {
+	// 方式1：直接指定完整规则
+	Enabled             *bool  `json:"enabled,omitempty"`               // 默认 true
+	DerivativeMarket    string `json:"derivative_market,omitempty"`     // spot | coinm
+	DerivativeSymbol    string `json:"derivative_symbol,omitempty"`     // btc_current | {base}USDT
+	DerivativeDirection string `json:"derivative_direction,omitempty"`  // opposite | same | rollover
+	DerivativeOrderType string `json:"derivative_order_type,omitempty"` // limit | market
+	PriceExpression     string `json:"price_expression,omitempty"`      // d_price + 40
+	QuantityExpression  string `json:"quantity_expression,omitempty"`   // delta_value / 100
+
+	// 方式2：基于模板创建（可选覆盖部分字段）
+	TemplateRuleID   *uint             `json:"template_rule_id,omitempty"`   // 模板规则 ID
+	TemplateRuleName string            `json:"template_rule_name,omitempty"` // 或者通过名称指定
+	Overrides        map[string]string `json:"overrides,omitempty"`          // 覆盖模板的字段
+}
+
+// ToFlowDerivativeRule 转换为内部规则配置
+func (input *FlowDerivativeRuleInput) ToFlowDerivativeRule() *models.FlowDerivativeRule {
+	if input == nil {
+		return nil
+	}
+
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+
+	return &models.FlowDerivativeRule{
+		Enabled:             enabled,
+		SourceType:          "custom",
+		DerivativeMarket:    input.DerivativeMarket,
+		DerivativeSymbol:    input.DerivativeSymbol,
+		DerivativeDirection: input.DerivativeDirection,
+		DerivativeOrderType: input.DerivativeOrderType,
+		PriceExpression:     input.PriceExpression,
+		QuantityExpression:  input.QuantityExpression,
+	}
 }
 
 // ==========================================
@@ -45,13 +86,14 @@ type OrderDTO struct {
 
 // FlowResponse 对应文档 1.1 和 1.2 的 Flow 响应结构
 type FlowResponse struct {
-	ID                  uint       `json:"id"`
-	FlowUUID            string     `json:"flow_uuid"`
-	Status              string     `json:"status"`
-	CreatedAt           time.Time  `json:"created_at"`
-	TotalFilledQuantity string     `json:"total_filled_quantity"`
-	DerivativeOrders    int        `json:"derivative_orders"`
-	Orders              []OrderDTO `json:"orders"`
+	ID                   uint                       `json:"id"`
+	FlowUUID             string                     `json:"flow_uuid"`
+	Status               string                     `json:"status"`
+	CreatedAt            time.Time                  `json:"created_at"`
+	TotalFilledQuantity  string                     `json:"total_filled_quantity"`
+	DerivativeOrders     int                        `json:"derivative_orders"`
+	Orders               []OrderDTO                 `json:"orders"`
+	DerivativeRuleConfig *models.FlowDerivativeRule `json:"derivative_rule_config,omitempty"`
 }
 
 // ==========================================
@@ -67,20 +109,24 @@ func mapFlowToResponse(flow *models.TradingFlow) FlowResponse {
 		Orders:    make([]OrderDTO, 0),
 	}
 
+	// 解析衍生规则配置
+	if flow.DerivativeRuleConfig != "" {
+		rule, err := models.ParseFlowDerivativeRule(flow.DerivativeRuleConfig)
+		if err == nil && rule != nil {
+			resp.DerivativeRuleConfig = rule
+		}
+	}
+
 	derivativeCount := 0
-	// 简单处理：总成交量通常指主订单的成交量
-	// 如果需要精确计算，可以使用 decimal 库累加
 	totalFilled := "0"
 	primaryFound := false
 
 	for _, order := range flow.Orders {
-		// 映射 OrderRole 显示名称
 		roleDisplay := "Main"
 		if order.OrderRole == models.OrderRoleDerivative {
 			roleDisplay = "Hedge"
 			derivativeCount++
 		} else if !primaryFound {
-			// 记录主订单的成交量作为 Flow 的成交进度
 			totalFilled = order.FilledQuantity
 			primaryFound = true
 		}

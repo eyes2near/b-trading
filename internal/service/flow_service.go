@@ -36,14 +36,15 @@ func (e *ErrNoMatchingRule) Error() string {
 }
 
 type CreateFlowRequest struct {
-	MarketType   string
-	Symbol       string
-	SymbolType   string
-	ContractType string
-	Direction    string
-	OrderType    string
-	Quantity     string
-	Price        string
+	MarketType     string
+	Symbol         string
+	SymbolType     string
+	ContractType   string
+	Direction      string
+	OrderType      string
+	Quantity       string
+	Price          string
+	DerivativeRule *models.FlowDerivativeRule
 }
 
 type flowServiceImpl struct {
@@ -78,8 +79,6 @@ func NewFlowService(
 	return svc
 }
 
-// internal/service/flow_service.go
-
 func (s *flowServiceImpl) CreateFlow(ctx context.Context, req CreateFlowRequest) (*models.TradingFlow, error) {
 	flowUUID := uuid.New().String()
 	orderUUID := uuid.New().String()
@@ -90,6 +89,106 @@ func (s *flowServiceImpl) CreateFlow(ctx context.Context, req CreateFlowRequest)
 		CreatedBy: "system",
 	}
 
+	// =========================================================
+	// 处理衍生规则配置
+	// 优先级：Flow 规则 > 全局规则
+	// =========================================================
+	var ruleSource string // 用于审计日志
+
+	if req.DerivativeRule != nil {
+		// =====================================================
+		// 情况 1：提供了 Flow 级别规则
+		// =====================================================
+		if err := req.DerivativeRule.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid derivative rule: %w", err)
+		}
+
+		// 验证表达式语法
+		if req.DerivativeRule.Enabled && s.derivativeEngine != nil {
+			tempRule := &models.DerivativeRule{
+				PrimaryMarket:    req.MarketType,
+				PrimarySymbol:    req.Symbol,
+				PrimaryDirection: req.Direction,
+
+				DerivativeMarket:    req.DerivativeRule.DerivativeMarket,
+				DerivativeDirection: req.DerivativeRule.DerivativeDirection,
+				DerivativeOrderType: req.DerivativeRule.DerivativeOrderType,
+				PriceExpression:     req.DerivativeRule.PriceExpression,
+				QuantityExpression:  req.DerivativeRule.QuantityExpression,
+			}
+			if err := s.derivativeEngine.ValidateRule(tempRule); err != nil {
+				return nil, fmt.Errorf("invalid derivative rule: %w", err)
+			}
+		}
+
+		// 序列化规则配置
+		ruleJSON, err := req.DerivativeRule.ToJSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize derivative rule: %w", err)
+		}
+		flow.DerivativeRuleConfig = ruleJSON
+
+		if req.DerivativeRule.Enabled {
+			ruleSource = "flow_rule"
+			log.Printf("Flow %s will use custom flow-level rule (enabled=true)", flowUUID)
+		} else {
+			ruleSource = "flow_rule_disabled"
+			log.Printf("Flow %s has flow-level rule but disabled", flowUUID)
+		}
+
+	} else if s.cfg.Derivative.Enabled && s.derivativeEngine != nil {
+		// =====================================================
+		// 情况 2：没有 Flow 规则，尝试匹配全局规则
+		// =====================================================
+		tempOrder := &models.Order{
+			MarketType:   models.MarketType(req.MarketType),
+			FullSymbol:   req.Symbol,
+			SymbolType:   req.SymbolType,
+			ContractType: models.ContractType(req.ContractType),
+			Direction:    models.Direction(req.Direction),
+		}
+
+		exists, matchedRule := s.derivativeEngine.CheckRuleExists(ctx, tempOrder)
+		if exists {
+			// 匹配到全局规则
+			ruleSource = fmt.Sprintf("global_rule:%s", matchedRule.Name)
+			log.Printf("Flow %s will use global rule [%s]", flowUUID, matchedRule.Name)
+		} else {
+			// 没有匹配的全局规则
+			if s.cfg.Derivative.RequireMatchingRule {
+				// 配置要求必须有规则 → 拒绝创建
+				log.Printf("Flow creation blocked: no derivative rule provided and no global rule matches (market=%s, symbol=%s, direction=%s)",
+					req.MarketType, req.Symbol, req.Direction)
+
+				s.notifier.NotifyNoMatchingRule(0, req.MarketType, req.Symbol)
+				s.audit.LogEvent(ctx, 0, 0, models.LogTypeError, models.LogSeverityWarning,
+					"Flow creation blocked: no matching derivative rule", map[string]interface{}{
+						"market_type": req.MarketType,
+						"symbol":      req.Symbol,
+						"direction":   req.Direction,
+					})
+
+				return nil, &ErrNoMatchingRule{
+					Market:    req.MarketType,
+					Symbol:    req.Symbol,
+					Direction: req.Direction,
+				}
+			} else {
+				// 配置不要求必须有规则 → 允许创建，但记录日志
+				ruleSource = "none"
+				log.Printf("Flow %s has no matching derivative rule, derivatives will be skipped (market=%s, symbol=%s, direction=%s)",
+					flowUUID, req.MarketType, req.Symbol, req.Direction)
+			}
+		}
+	} else {
+		// =====================================================
+		// 情况 3：衍生功能未启用
+		// =====================================================
+		ruleSource = "derivative_disabled"
+		log.Printf("Flow %s: derivative feature is disabled", flowUUID)
+	}
+
+	// 创建主订单对象
 	order := &models.Order{
 		OrderUUID:      orderUUID,
 		OrderRole:      models.OrderRolePrimary,
@@ -105,30 +204,6 @@ func (s *flowServiceImpl) CreateFlow(ctx context.Context, req CreateFlowRequest)
 		FilledQuantity: "0",
 	}
 
-	// 检查衍生规则匹配
-	if s.cfg.Derivative.Enabled && s.cfg.Derivative.RequireMatchingRule && s.derivativeEngine != nil {
-		exists, matchedRule := s.derivativeEngine.CheckRuleExists(ctx, order)
-		if !exists {
-			log.Printf("Flow creation blocked: no matching derivative rule (market=%s, symbol=%s, direction=%s)",
-				req.MarketType, req.Symbol, req.Direction)
-
-			s.notifier.NotifyNoMatchingRule(0, req.MarketType, req.Symbol)
-			s.audit.LogEvent(ctx, 0, 0, models.LogTypeError, models.LogSeverityWarning,
-				"Flow creation blocked: no matching derivative rule", map[string]interface{}{
-					"market_type": req.MarketType,
-					"symbol":      req.Symbol,
-					"direction":   req.Direction,
-				})
-
-			return nil, &ErrNoMatchingRule{
-				Market:    req.MarketType,
-				Symbol:    req.Symbol,
-				Direction: req.Direction,
-			}
-		}
-		log.Printf("Matched derivative rule [%s] for new order", matchedRule.Name)
-	}
-
 	// 原子创建 Flow + Order
 	if err := s.flowRepo.CreateFlowWithOrder(ctx, flow, order); err != nil {
 		s.notifier.NotifyPrimaryOrderFailed(flowUUID, req.Symbol, "创建订单记录: "+err.Error())
@@ -137,11 +212,12 @@ func (s *flowServiceImpl) CreateFlow(ctx context.Context, req CreateFlowRequest)
 
 	s.audit.LogEvent(ctx, flow.ID, order.ID, models.LogTypeOrderCreate, models.LogSeverityInfo,
 		"Created flow and primary order", map[string]interface{}{
-			"flow_uuid":  flowUUID,
-			"order_uuid": orderUUID,
-			"symbol":     req.Symbol,
-			"direction":  req.Direction,
-			"quantity":   req.Quantity,
+			"flow_uuid":   flowUUID,
+			"order_uuid":  orderUUID,
+			"symbol":      req.Symbol,
+			"direction":   req.Direction,
+			"quantity":    req.Quantity,
+			"rule_source": ruleSource,
 		})
 
 	// 提交订单到 Binance
@@ -153,49 +229,50 @@ func (s *flowServiceImpl) CreateFlow(ctx context.Context, req CreateFlowRequest)
 	}
 
 	// =========================================================
-	// 关键修复：处理订单的不同终态情况
+	// 处理订单的不同终态情况
 	// =========================================================
-	if models.IsTerminalBinanceStatus(binanceOrder.Status) {
+	if models.IsTerminalOrderStatus(binanceOrder.Status) {
+		// 检查是否有成交量
 		executedQty := strings.TrimSpace(binanceOrder.ExecutedQty)
-		if executedQty != "" && executedQty != "0" {
-			// 处理立即成交：创建 FillEvent + 触发衍生订单
-			if err := s.orderSvc.HandleImmediateFill(ctx, order, binanceOrder); err != nil {
-				log.Printf("Warning: Failed to handle immediate fill: %v", err)
-				s.audit.LogEvent(ctx, flow.ID, order.ID, models.LogTypeError, models.LogSeverityWarning,
-					"Failed to handle immediate fill", map[string]interface{}{
-						"error": err.Error(),
-					})
-			}
-		}
-		auditMsg := ""
-		reason := fmt.Sprintf("Primary order %s", binanceOrder.Status)
+		hasFill := executedQty != "" && executedQty != "0"
+
 		switch binanceOrder.Status {
 		case "FILLED":
-			// 订单立即完全成交（如市价单）
+			// 订单立即完全成交
 			log.Printf("Primary order %d filled immediately", order.ID)
-			// 注意：此时主订单已完成，但衍生订单可能刚创建
-			// Flow 状态会在所有订单完成后由 CheckFlowCompletion 更新
-		case "CANCELED":
-			auditMsg = "Primary order canceled"
-			// 订单被拒绝或取消
-			log.Printf("Primary order %d canceled with status: %s", order.ID, binanceOrder.Status)
-		case "REJECTED":
-			auditMsg = "Primary order rejected"
-			// 订单被拒绝或取消
-			log.Printf("Primary order %d rejected with status: %s", order.ID, binanceOrder.Status)
-		case "EXPIRED":
-			auditMsg = "Primary order expired"
-			// 订单被拒绝或取消
-			log.Printf("Primary order %d expired with status: %s", order.ID, binanceOrder.Status)
-		}
-		if auditMsg != "" {
+
+			if hasFill {
+				if err := s.orderSvc.HandleImmediateFill(ctx, order, binanceOrder); err != nil {
+					log.Printf("Warning: Failed to handle immediate fill: %v", err)
+					s.audit.LogEvent(ctx, flow.ID, order.ID, models.LogTypeError, models.LogSeverityWarning,
+						"Failed to handle immediate fill", map[string]interface{}{
+							"error": err.Error(),
+						})
+				}
+			}
+
+		case "CANCELED", "REJECTED", "EXPIRED":
+			// 订单被取消/拒绝/过期
+			log.Printf("Primary order %d terminated with status: %s", order.ID, binanceOrder.Status)
+
+			// 如果有部分成交，先处理成交
+			if hasFill {
+				if err := s.orderSvc.HandleImmediateFill(ctx, order, binanceOrder); err != nil {
+					log.Printf("Warning: Failed to handle partial fill before termination: %v", err)
+				}
+			}
+
+			reason := fmt.Sprintf("Primary order %s", binanceOrder.Status)
 			if err := s.flowRepo.UpdateStatus(ctx, flow.ID, models.FlowStatusCancelled, reason); err != nil {
 				log.Printf("Failed to update flow status: %v", err)
 			}
+
 			s.audit.LogEvent(ctx, flow.ID, order.ID, models.LogTypeError, models.LogSeverityError,
-				auditMsg, map[string]interface{}{
+				fmt.Sprintf("Primary order %s", strings.ToLower(binanceOrder.Status)), map[string]interface{}{
 					"binance_status": binanceOrder.Status,
+					"executed_qty":   executedQty,
 				})
+
 			s.notifier.NotifyPrimaryOrderFailed(flowUUID, req.Symbol, reason)
 		}
 	} else {
@@ -245,7 +322,7 @@ func (s *flowServiceImpl) CheckFlowCompletion(ctx context.Context, flowID uint) 
 
 	allTerminal := true
 	for _, order := range flow.Orders {
-		if !models.IsTerminalOrderStatus(order.Status) {
+		if !models.IsTerminalOrderStatus(string(order.Status)) {
 			allTerminal = false
 			break
 		}

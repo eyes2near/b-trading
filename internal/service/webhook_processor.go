@@ -32,6 +32,7 @@ const maxOptimisticRetries = 3
 type webhookProcessor struct {
 	cfg              *config.Config
 	orderRepo        database.OrderRepository
+	flowRepo         database.TradingFlowRepository
 	deliveryRepo     database.WebhookDeliveryRepository
 	lockManager      *OrderLockManager
 	orderService     OrderService
@@ -45,6 +46,7 @@ type webhookProcessor struct {
 func NewWebhookProcessor(
 	cfg *config.Config,
 	orderRepo database.OrderRepository,
+	flowRepo database.TradingFlowRepository,
 	deliveryRepo database.WebhookDeliveryRepository,
 	orderService OrderService,
 	fillProcessor FillProcessor,
@@ -56,6 +58,7 @@ func NewWebhookProcessor(
 	return &webhookProcessor{
 		cfg:              cfg,
 		orderRepo:        orderRepo,
+		flowRepo:         flowRepo,
 		deliveryRepo:     deliveryRepo,
 		lockManager:      NewOrderLockManager(),
 		orderService:     orderService,
@@ -195,7 +198,7 @@ func (p *webhookProcessor) handleFillUpdate(ctx context.Context, order *models.O
 	}
 
 	// 检查流程完成
-	if models.IsTerminalOrderStatus(order.Status) {
+	if models.IsTerminalOrderStatus(string(order.Status)) {
 		_ = p.flowService.CheckFlowCompletion(ctx, order.FlowID)
 	}
 
@@ -204,14 +207,7 @@ func (p *webhookProcessor) handleFillUpdate(ctx context.Context, order *models.O
 
 func (p *webhookProcessor) handleTerminal(ctx context.Context, order *models.Order, event *binance.WebhookEvent, delivery *models.WebhookDelivery) error {
 	// 若已终态，忽略
-	if models.IsTerminalOrderStatus(order.Status) {
-		//可以不用audit，订单状态符合预期
-		// p.audit.LogEvent(ctx, order.FlowID, order.ID, models.LogTypeSystem, models.LogSeverityInfo,
-		// 	"Terminal event ignored (order already terminal)", map[string]interface{}{
-		// 		"current_status": string(order.Status),
-		// 		"event_status":   event.Data.Status,
-		// 		"delivery_id":    delivery.DeliveryID,
-		// 	})
+	if models.IsTerminalOrderStatus(string(order.Status)) {
 		return nil
 	}
 
@@ -259,12 +255,20 @@ func (p *webhookProcessor) triggerDerivative(ctx context.Context, order *models.
 		return
 	}
 
-	derivativeParams, err := p.derivativeEngine.GenerateDerivativeOrder(ctx, derivative.FillParams{
+	// 获取 Flow 信息
+	flow, err := p.flowRepo.GetByID(ctx, order.FlowID)
+	if err != nil {
+		log.Printf("Failed to get flow for derivative trigger: %v", err)
+		return
+	}
+
+	// 使用 Flow 级别规则（优先）或全局规则
+	derivativeParams, err := p.derivativeEngine.GenerateDerivativeOrderForFlow(ctx, derivative.FillParams{
 		PrimaryOrder:  order,
 		FillPrice:     fillEvent.FillPrice,
 		Delta:         fillEvent.FillQuantity,
 		CumulativeQty: order.FilledQuantity,
-	})
+	}, flow)
 
 	if err != nil {
 		log.Printf("Failed to generate derivative order: %v", err)

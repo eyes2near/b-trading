@@ -1,6 +1,11 @@
 // internal/models/converters.go
 package models
 
+import (
+	"strings"
+	"unicode"
+)
+
 // ============================================
 // Binance 状态映射
 // ============================================
@@ -25,24 +30,15 @@ func MapBinanceStatus(status string) OrderStatus {
 	}
 }
 
-// IsTerminalBinanceStatus 检查 Binance 状态是否为终态
-func IsTerminalBinanceStatus(status string) bool {
-	switch status {
-	case "FILLED", "CANCELED", "REJECTED", "EXPIRED":
-		return true
-	default:
-		return false
-	}
-}
-
 // ============================================
 // 内部状态判断
 // ============================================
 
 // IsTerminalOrderStatus 检查订单状态是否为终态
-func IsTerminalOrderStatus(status OrderStatus) bool {
+func IsTerminalOrderStatus(status string) bool {
+	status = strings.ToUpper(status)
 	switch status {
-	case OrderStatusFilled, OrderStatusCancelled, OrderStatusRejected, OrderStatusExpired:
+	case "FILLED", "CANCELED", "REJECTED", "EXPIRED":
 		return true
 	default:
 		return false
@@ -96,5 +92,41 @@ func OrderTypeToString(t OrderType) string {
 		return "MARKET"
 	default:
 		return "LIMIT"
+	}
+}
+
+// NormalizeMarketKey 归一化 market 字段。
+// 统一输出：
+//   - "spot"
+//   - "coin-m"
+//
+// 兼容输入：spot / SPOT / " coin-m " / "coin_m" / "coinm"
+func NormalizeMarketKey(m string) MarketType {
+	s := strings.TrimSpace(m)
+	if s == "" {
+		return ""
+	}
+
+	s = strings.ToLower(s)
+	// 去掉所有空白字符
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
+
+	// 统一去掉分隔符：coin-m / coin_m -> coinm
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.ReplaceAll(s, "_", "")
+
+	switch s {
+	case "spot":
+		return MarketTypeSpot
+	case "coinm":
+		return MarketTypeCoinM
+	default:
+		// 未知值：返回“清洗后”的结果，便于后续统一处理/报错
+		return MarketType(s)
 	}
 }

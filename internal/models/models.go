@@ -109,6 +109,8 @@ type TradingFlow struct {
 	TimeoutAt   sql.NullTime `json:"timeout_at,omitempty"`
 	Notes       string       `gorm:"type:text" json:"notes,omitempty"`
 
+	DerivativeRuleConfig string `gorm:"type:text" json:"derivative_rule_config,omitempty"` // JSON
+
 	// 审计字段
 	CreatedBy       string `gorm:"size:100" json:"created_by,omitempty"`
 	CancelledReason string `gorm:"type:text" json:"cancelled_reason,omitempty"`

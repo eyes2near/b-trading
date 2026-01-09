@@ -108,7 +108,7 @@ func (p *fillProcessor) ProcessFill(ctx context.Context, order *models.Order, fi
 		"version":         order.Version + 1,
 	}
 
-	if models.IsTerminalOrderStatus(newStatus) {
+	if models.IsTerminalOrderStatus(string(newStatus)) {
 		updates["completed_at"] = sql.NullTime{Time: time.Now(), Valid: true}
 		updates["track_job_status"] = "terminal"
 	}

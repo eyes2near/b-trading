@@ -64,6 +64,7 @@ func NewServer(
 		orderRepo,
 		fillRepo,
 		ruleRepo,
+		flowRepo,
 		fillProcessor,
 		auditService,
 		notifier,
@@ -85,6 +86,7 @@ func NewServer(
 	webhookProcessor := service.NewWebhookProcessor(
 		cfg,
 		orderRepo,
+		flowRepo,
 		deliveryRepo,
 		orderService,
 		fillProcessor,

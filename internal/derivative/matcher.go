@@ -108,13 +108,18 @@ func (m *Matcher) SymbolMatches(pattern string, order *models.Order) bool {
 	}
 
 	// coinm 语义匹配：btc_current / btc_next
-	if strings.Contains(pattern, "_") {
-		parts := strings.Split(strings.ToLower(pattern), "_")
+	if strings.ContainsAny(pattern, "_-") {
+		seqStr := "_"
+		if strings.Contains(pattern, "-") {
+			seqStr = "-"
+		}
+		parts := strings.Split(strings.ToLower(pattern), seqStr)
 		if len(parts) == 2 {
 			base := strings.ToUpper(parts[0])
 			contractType := parts[1] // current / next
 
 			orderBase := ExtractBaseCurrency(orderSymbol)
+
 			if orderBase != base {
 				return false
 			}
@@ -136,7 +141,6 @@ func (m *Matcher) SymbolMatches(pattern string, order *models.Order) bool {
 				if order.ContractType != "" {
 					return contractType == strings.ToLower(string(order.ContractType))
 				}
-
 				// 无法确定 contract type，不匹配
 				return false
 			}

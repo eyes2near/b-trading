@@ -19,7 +19,7 @@ type DerivativeRule struct {
 	// 主订单匹配条件
 	PrimaryMarket    string `gorm:"not null;size:20;index:idx_primary" json:"primary_market"` // spot | coinm
 	PrimarySymbol    string `gorm:"not null;size:50;index:idx_primary" json:"primary_symbol"` // BTCUSDT | btc_current | *
-	PrimaryDirection string `gorm:"size:100" json:"primary_direction"`                        // close_short | long | close_short,close_long | * | 空
+	PrimaryDirection string `gorm:"size:100" json:"primary_direction"`                        // close_short | long | short,close_long | * | 空
 
 	// 衍生订单生成规则
 	DerivativeMarket    string `gorm:"not null;size:20" json:"derivative_market"`                   // spot | coinm

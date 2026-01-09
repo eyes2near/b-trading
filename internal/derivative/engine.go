@@ -35,6 +35,12 @@ type Engine interface {
 
 	// StartAutoRefresh 启动自动刷新
 	StartAutoRefresh(ctx context.Context, interval time.Duration)
+
+	// GenerateDerivativeOrderWithFlowRule 使用 Flow 级别规则生成衍生订单
+	GenerateDerivativeOrderWithFlowRule(ctx context.Context, params FillParams, flowRule *models.FlowDerivativeRule) (*DerivativeOrderParams, error)
+
+	// GenerateDerivativeOrderForFlow 自动选择规则（Flow 优先，全局 fallback）
+	GenerateDerivativeOrderForFlow(ctx context.Context, params FillParams, flow *models.TradingFlow) (*DerivativeOrderParams, error)
 }
 
 type engine struct {
@@ -119,7 +125,7 @@ func (e *engine) GenerateDerivativeOrder(ctx context.Context, params FillParams)
 	log.Printf("Matched derivative rule [%s] for order %d", rule.Name, order.ID)
 
 	// 2. 解析目标 symbol
-	resolved, err := e.resolver.Resolve(ctx, rule.DerivativeSymbol, order)
+	resolved, err := e.resolver.Resolve(ctx, rule.DerivativeSymbol, order.FullSymbol)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to resolve symbol: %v", err)
 		e.notifier.NotifyDerivativeFailure(order.ID, rule.DerivativeSymbol, rule.Name, "解析Symbol", errMsg)
@@ -165,7 +171,7 @@ func (e *engine) GenerateDerivativeOrder(ctx context.Context, params FillParams)
 	}
 
 	// 8. 归一化市场类型
-	market := normalizeMarketType(rule.DerivativeMarket)
+	market := models.NormalizeMarketKey(rule.DerivativeMarket)
 
 	// 9. 记录执行日志
 	logID := e.logExecution(ctx, rule, order, evalCtx, price, quantity, nil)
@@ -191,19 +197,119 @@ func (e *engine) GenerateDerivativeOrder(ctx context.Context, params FillParams)
 	return result, nil
 }
 
-// normalizeMarketType 归一化市场类型为标准 models.MarketType
-func normalizeMarketType(market string) models.MarketType {
-	m := strings.TrimSpace(strings.ToLower(market))
-	m = strings.ReplaceAll(m, "-", "")
+// GenerateDerivativeOrderForFlow 自动选择规则生成衍生订单（Flow 优先，全局 fallback）
+func (e *engine) GenerateDerivativeOrderForFlow(ctx context.Context, params FillParams, flow *models.TradingFlow) (*DerivativeOrderParams, error) {
+	order := params.PrimaryOrder
 
-	switch m {
-	case "spot":
-		return models.MarketTypeSpot // "spot"
-	case "coinm":
-		return models.MarketTypeCoinM // "coin-m"
-	default:
-		return models.MarketType(market)
+	// 1. 优先使用 Flow 级别规则
+	if flow.DerivativeRuleConfig != "" {
+		flowRule, err := models.ParseFlowDerivativeRule(flow.DerivativeRuleConfig)
+		if err != nil {
+			// 解析失败，通知并尝试回退到全局规则
+			log.Printf("Failed to parse flow derivative rule for flow %d (order %d, symbol=%s): %v",
+				flow.ID, order.ID, order.FullSymbol, err)
+			e.notifier.NotifyDerivativeFailure(order.ID, order.FullSymbol, "", "解析Flow规则", err.Error())
+			// 继续尝试全局规则
+		} else if flowRule != nil {
+			if !flowRule.Enabled {
+				log.Printf("Flow %d (order %d) has derivative rule but disabled, skipping",
+					flow.ID, order.ID)
+				return nil, nil
+			}
+
+			log.Printf("Using flow-level rule for order %d (flow=%d, market=%s, symbol=%s)",
+				order.ID, flow.ID, order.MarketType, order.FullSymbol)
+			return e.GenerateDerivativeOrderWithFlowRule(ctx, params, flowRule)
+		}
 	}
+
+	// 2. 回退到全局规则
+	log.Printf("Flow %d (order %d, market=%s, symbol=%s) has no custom rule, falling back to global rules",
+		flow.ID, order.ID, order.MarketType, order.FullSymbol)
+	return e.GenerateDerivativeOrder(ctx, params)
+}
+
+// GenerateDerivativeOrderWithFlowRule 使用指定的 Flow 规则生成衍生订单
+func (e *engine) GenerateDerivativeOrderWithFlowRule(ctx context.Context, params FillParams, flowRule *models.FlowDerivativeRule) (*DerivativeOrderParams, error) {
+	order := params.PrimaryOrder
+
+	// 转换为内部规则格式
+	rule := flowRule.ToDerivativeRule(order)
+
+	log.Printf("Generating derivative order with flow rule for order %d (market=%s, symbol=%s -> %s)",
+		order.ID, flowRule.DerivativeMarket, order.FullSymbol, flowRule.DerivativeSymbol)
+
+	// 2. 解析目标 symbol
+	resolved, err := e.resolver.Resolve(ctx, rule.DerivativeSymbol, order.FullSymbol)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to resolve symbol: %v", err)
+		e.notifier.NotifyDerivativeFailure(order.ID, rule.DerivativeSymbol, rule.Name, "解析Symbol", errMsg)
+		e.logExecution(ctx, rule, order, nil, "", "", err)
+		return nil, fmt.Errorf("failed to resolve symbol: %w", err)
+	}
+
+	// 3. 获取市场数据，构建变量上下文
+	evalCtx, err := e.buildEvaluationContext(ctx, params, rule, resolved)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to build evaluation context: %v", err)
+		e.notifier.NotifyDerivativeFailure(order.ID, resolved.Symbol, rule.Name, "构建上下文", errMsg)
+		e.logExecution(ctx, rule, order, nil, "", "", err)
+		return nil, fmt.Errorf("failed to build evaluation context: %w", err)
+	}
+
+	// 4. 求值价格表达式
+	priceFloat, err := e.evaluator.Evaluate(rule.PriceExpression, evalCtx)
+	if err != nil {
+		e.notifier.NotifyDerivativeFailure(order.ID, resolved.Symbol, rule.Name, "价格表达式求值", err.Error())
+		e.logExecution(ctx, rule, order, evalCtx, "", "", err)
+		return nil, fmt.Errorf("failed to evaluate price expression: %w", err)
+	}
+
+	// 5. 求值数量表达式
+	qtyFloat, err := e.evaluator.Evaluate(rule.QuantityExpression, evalCtx)
+	if err != nil {
+		e.notifier.NotifyDerivativeFailure(order.ID, resolved.Symbol, rule.Name, "数量表达式求值", err.Error())
+		e.logExecution(ctx, rule, order, evalCtx, "", "", err)
+		return nil, fmt.Errorf("failed to evaluate quantity expression: %w", err)
+	}
+
+	// 6. 格式化精度
+	price := e.formatter.FormatPrice(priceFloat)
+	quantity := e.formatter.FormatQuantity(qtyFloat, rule.DerivativeMarket)
+
+	// 7. 计算方向
+	direction := e.resolveDirection(rule.DerivativeDirection, order.Direction)
+	if direction == "" {
+		log.Printf("Skipping derivative order for order %d: primary direction %s not applicable for rule direction %s",
+			order.ID, order.Direction, rule.DerivativeDirection)
+		return nil, nil
+	}
+
+	// 8. 归一化市场类型
+	market := models.NormalizeMarketKey(rule.DerivativeMarket)
+
+	// 9. 记录执行日志
+	logID := e.logExecution(ctx, rule, order, evalCtx, price, quantity, nil)
+
+	// 10. 构建结果
+	result := &DerivativeOrderParams{
+		RuleID:            rule.ID, // Flow 规则 ID 为 0
+		RuleName:          rule.Name,
+		Market:            market,
+		Symbol:            resolved.Symbol,
+		SymbolType:        resolved.SymbolType,
+		Direction:         direction,
+		OrderType:         models.OrderType(rule.DerivativeOrderType),
+		Price:             price,
+		Quantity:          quantity,
+		EvaluationContext: e.contextToStringMap(evalCtx),
+		LogID:             logID,
+	}
+
+	log.Printf("Generated derivative order (flow-level) for order %d: symbol=%s, direction=%s, price=%s, qty=%s",
+		order.ID, result.Symbol, result.Direction, result.Price, result.Quantity)
+
+	return result, nil
 }
 
 func (e *engine) ValidateRule(rule *models.DerivativeRule) error {
