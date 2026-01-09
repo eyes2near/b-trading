@@ -80,6 +80,7 @@ const (
 	LogTypeFlowComplete      LogType = "flow_complete"
 	LogTypeError             LogType = "error"
 	LogTypeSystem            LogType = "system"
+	LogTypeOrderComplete     LogType = "order_complete"
 )
 
 type LogSeverity string

@@ -1,4 +1,4 @@
-// internal/models/converters.go
+// internal/models/helpers.go
 package models
 
 import (
