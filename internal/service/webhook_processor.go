@@ -1,4 +1,4 @@
-// internal/service/webhook_processor.go (重构后)
+// internal/service/webhook_processor.go
 package service
 
 import (
@@ -166,7 +166,7 @@ func (p *webhookProcessor) handleFillUpdate(ctx context.Context, order *models.O
 	fillPrice, qty := CalculateFillPriceAndQty(order, orderData.ExecutedQty, orderData.AvgPrice)
 
 	if qty.IsZero() {
-		//事件乱序，正常现象，直接幂等不处理
+		// 事件乱序，正常现象，直接幂等不处理
 		return nil
 	}
 
@@ -197,9 +197,15 @@ func (p *webhookProcessor) handleFillUpdate(ctx context.Context, order *models.O
 		p.triggerDerivative(ctx, order, fillEvent)
 	}
 
-	// 检查流程完成
-	if models.IsTerminalOrderStatus(string(order.Status)) {
+	// 如果 Binance 状态是终态，更新订单状态并检查流程完成
+	if models.IsTerminalOrderStatus(event.Data.Status) {
+		if err := p.updateOrderToTerminal(ctx, order, event.Data.Status, orderData.ExecutedQty); err != nil {
+			log.Printf("Failed to update order to terminal in fill_update: %v", err)
+		}
 		_ = p.flowService.CheckFlowCompletion(ctx, order.FlowID)
+	} else {
+		// 非终态时也要更新订单状态（如 PARTIALLY_FILLED）
+		p.updateOrderStatus(ctx, order, event.Data.Status)
 	}
 
 	return nil
@@ -208,33 +214,42 @@ func (p *webhookProcessor) handleFillUpdate(ctx context.Context, order *models.O
 func (p *webhookProcessor) handleTerminal(ctx context.Context, order *models.Order, event *binance.WebhookEvent, delivery *models.WebhookDelivery) error {
 	// 若已终态，忽略
 	if models.IsTerminalOrderStatus(string(order.Status)) {
+		log.Printf("Order %d already in terminal state %s, skipping", order.ID, order.Status)
 		return nil
 	}
 
 	orderData := event.Data.Order
+	binanceStatus := event.Data.Status
+
+	log.Printf("Processing terminal event for order %d, binance_status=%s, executed_qty=%s",
+		order.ID, binanceStatus, orderData.ExecutedQty)
+
+	// 解析成交量
 	newCum, err := decimal.NewFromString(orderData.ExecutedQty)
 	if err != nil {
-		lastCum, _ := decimal.NewFromString(order.FilledQuantity)
-		newCum = lastCum
+		newCum = decimal.Zero
 	}
 
+	// 计算是否有新增成交
 	fillPrice, qty := CalculateFillPriceAndQty(order, orderData.ExecutedQty, orderData.AvgPrice)
+
+	// 处理可能遗漏的成交
+	var fillEvent *models.FillEvent
 	if qty.GreaterThan(decimal.Zero) {
-		// 处理可能遗漏的成交
 		fill := &FillData{
 			Price:         fillPrice,
 			Quantity:      qty,
 			AvgPrice:      orderData.AvgPrice,
 			CumulativeQty: newCum,
 			FillTime:      time.Now(),
-			BinanceStatus: event.Data.Status,
+			BinanceStatus: binanceStatus,
 			Source:        "terminal",
 			RawData:       delivery.RawPayload,
 		}
-		fillEvent, err := p.fillProcessor.ProcessFill(ctx, order, fill)
+
+		fillEvent, err = p.fillProcessor.ProcessFill(ctx, order, fill)
 		if err != nil && err != ErrOptimisticLock {
-			// ProcessFill 可能返回 nil fillEvent（无新增成交），但仍需更新终态
-			log.Printf("Fill processing in terminal: %v", err)
+			log.Printf("Fill processing in terminal event: %v", err)
 		}
 
 		// 若有新增成交，触发衍生订单
@@ -243,10 +258,128 @@ func (p *webhookProcessor) handleTerminal(ctx context.Context, order *models.Ord
 		}
 	}
 
+	// 更新订单状态为终态
+	if err := p.updateOrderToTerminal(ctx, order, binanceStatus, orderData.ExecutedQty); err != nil {
+		log.Printf("Failed to update order %d to terminal state: %v", order.ID, err)
+		return err
+	}
+
+	// 审计日志
+	p.audit.LogEvent(ctx, order.FlowID, order.ID, models.LogTypeOrderComplete, models.LogSeverityInfo,
+		"Order reached terminal state", map[string]interface{}{
+			"binance_status": binanceStatus,
+			"executed_qty":   orderData.ExecutedQty,
+			"had_new_fill":   fillEvent != nil,
+			"source":         "terminal_webhook",
+		})
+
 	// 检查流程完成
-	_ = p.flowService.CheckFlowCompletion(ctx, order.FlowID)
+	if err := p.flowService.CheckFlowCompletion(ctx, order.FlowID); err != nil {
+		log.Printf("Failed to check flow completion: %v", err)
+	}
 
 	return nil
+}
+
+// updateOrderToTerminal 将订单更新为终态（带乐观锁重试）
+func (p *webhookProcessor) updateOrderToTerminal(ctx context.Context, order *models.Order, binanceStatus string, executedQty string) error {
+	newStatus := models.MapBinanceStatus(binanceStatus)
+	reason := fmt.Sprintf("Terminal webhook received: %s", binanceStatus)
+
+	for retry := 0; retry < maxOptimisticRetries; retry++ {
+		// 重新获取最新订单状态
+		currentOrder, err := p.orderRepo.GetByID(ctx, order.ID)
+		if err != nil {
+			return fmt.Errorf("failed to get order: %w", err)
+		}
+
+		// 如果已经是终态，无需更新
+		if models.IsTerminalOrderStatus(string(currentOrder.Status)) {
+			log.Printf("Order %d already terminal (status=%s), skip update", order.ID, currentOrder.Status)
+			return nil
+		}
+
+		// 构建更新字段
+		updates := map[string]interface{}{
+			"status":           newStatus,
+			"track_job_status": "terminal",
+			"completed_at":     time.Now(),
+			"version":          currentOrder.Version + 1,
+		}
+
+		// 更新成交量（如果有变化）
+		if executedQty != "" && executedQty != currentOrder.FilledQuantity {
+			updates["filled_quantity"] = executedQty
+		}
+
+		// 使用乐观锁更新
+		rows, err := p.orderRepo.UpdateWithVersion(ctx, currentOrder.ID, currentOrder.Version, updates)
+		if err != nil {
+			return fmt.Errorf("failed to update order: %w", err)
+		}
+
+		if rows > 0 {
+			// 更新成功，记录状态历史
+			history := &models.OrderStatusHistory{
+				OrderID:    order.ID,
+				FromStatus: string(currentOrder.Status),
+				ToStatus:   string(newStatus),
+				ChangedAt:  time.Now(),
+				Reason:     reason,
+			}
+			if err := p.orderRepo.CreateStatusHistory(ctx, history); err != nil {
+				log.Printf("Failed to create status history: %v", err)
+			}
+
+			log.Printf("Order %d updated to terminal status %s", order.ID, newStatus)
+			return nil
+		}
+
+		// 乐观锁冲突，重试
+		log.Printf("Optimistic lock conflict updating order %d to terminal, retry %d/%d",
+			order.ID, retry+1, maxOptimisticRetries)
+	}
+
+	return fmt.Errorf("max retries exceeded updating order %d to terminal state", order.ID)
+}
+
+// updateOrderStatus 更新订单状态（非终态情况）
+func (p *webhookProcessor) updateOrderStatus(ctx context.Context, order *models.Order, binanceStatus string) {
+	newStatus := models.MapBinanceStatus(binanceStatus)
+
+	// 如果状态没有变化，跳过
+	if order.Status == newStatus {
+		return
+	}
+
+	for retry := 0; retry < maxOptimisticRetries; retry++ {
+		currentOrder, err := p.orderRepo.GetByID(ctx, order.ID)
+		if err != nil {
+			log.Printf("Failed to get order for status update: %v", err)
+			return
+		}
+
+		// 如果已经是终态，不应该回退
+		if models.IsTerminalOrderStatus(string(currentOrder.Status)) {
+			return
+		}
+
+		updates := map[string]interface{}{
+			"status":  newStatus,
+			"version": currentOrder.Version + 1,
+		}
+
+		rows, err := p.orderRepo.UpdateWithVersion(ctx, currentOrder.ID, currentOrder.Version, updates)
+		if err != nil {
+			log.Printf("Failed to update order status: %v", err)
+			return
+		}
+
+		if rows > 0 {
+			log.Printf("Order %d status updated to %s", order.ID, newStatus)
+			return
+		}
+	}
 }
 
 func (p *webhookProcessor) triggerDerivative(ctx context.Context, order *models.Order, fillEvent *models.FillEvent) {

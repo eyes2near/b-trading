@@ -38,7 +38,7 @@ func MapBinanceStatus(status string) OrderStatus {
 func IsTerminalOrderStatus(status string) bool {
 	status = strings.ToUpper(status)
 	switch status {
-	case "FILLED", "CANCELED", "REJECTED", "EXPIRED":
+	case "FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED":
 		return true
 	default:
 		return false

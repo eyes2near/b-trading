@@ -323,6 +323,7 @@ func (s *flowServiceImpl) CheckFlowCompletion(ctx context.Context, flowID uint) 
 	allTerminal := true
 	for _, order := range flow.Orders {
 		if !models.IsTerminalOrderStatus(string(order.Status)) {
+			log.Printf("Order %d is not in terminal state %s, skipping flow completion check\n", order.ID, order.Status)
 			allTerminal = false
 			break
 		}
